@@ -1,30 +1,70 @@
 import { getOpenAIClient } from "@/lib/openai";
 import { buildChatInstructions, buildSystemPrompt } from "@/lib/ai/prompts";
 import { analyzeToneMirror } from "@/lib/ai/tone-mirror";
-import { demoMemories } from "@/lib/mock-data";
 import { env } from "@/lib/env";
 import type { ChatRequestContext } from "@/lib/types";
 
-const EMERGENCY_RESPONSE = {
-  reply:
-    "Samajh sakta hoon bhai, thoda heavy lag raha hai. Chalo ek practical step se start karte hain.",
-  selectedModel: "fallback-emergency",
-  tone: "warm_friend" as const,
-  analysis: {
-    language: "english" as const,
-    tone: "warm_friend" as const,
-    emotionalIntensity: 45,
-  },
-  fallbackUsed: true,
+const PRIMARY_MODEL = "deepseek/deepseek-chat-v3-0324:free";
+const FALLBACK_MODELS = ["google/gemini-flash-1.5", "openai/gpt-3.5-turbo"] as const;
+const RETIRED_SLOW_MODELS = new Set(["meta-llama/llama-3.3-70b-instruct:free"]);
+const MAX_COMPLETION_TOKENS = 360;
+const DEFAULT_MODEL_TIMEOUT_MS = 6500;
+const PRIMARY_MODEL_TIMEOUT_MS = 9000;
+
+type GenerateOptions = {
+  signal?: AbortSignal;
+  deadlineMs?: number;
 };
 
-function createAbortController(timeoutMs: number) {
+type OpenRouterAttempt = {
+  model: string;
+  durationMs: number;
+  error: string;
+};
+
+class ChatTimeoutError extends Error {
+  attempts: OpenRouterAttempt[];
+
+  constructor(message: string, attempts: OpenRouterAttempt[] = []) {
+    super(message);
+    this.name = "ChatTimeoutError";
+    this.attempts = attempts;
+  }
+}
+
+class ChatProviderError extends Error {
+  attempts: OpenRouterAttempt[];
+
+  constructor(message: string, attempts: OpenRouterAttempt[]) {
+    super(message);
+    this.name = "ChatProviderError";
+    this.attempts = attempts;
+  }
+}
+
+function createAbortController(timeoutMs: number, parentSignal?: AbortSignal) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const abortFromParent = () => {
+    controller.abort(parentSignal?.reason);
+  };
+
+  if (parentSignal?.aborted) {
+    abortFromParent();
+  } else {
+    parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  }
+
+  const timer = setTimeout(() => {
+    controller.abort(new ChatTimeoutError(`OpenRouter request timed out after ${timeoutMs}ms.`));
+  }, timeoutMs);
 
   return {
     controller,
-    clear: () => clearTimeout(timer),
+    clear: () => {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    },
   };
 }
 
@@ -36,6 +76,27 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function getText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return typeof error === "string" ? error : "Unknown OpenRouter error";
+}
+
+function isAbortError(error: unknown) {
+  return (
+    error instanceof ChatTimeoutError ||
+    (error instanceof Error && error.name === "AbortError") ||
+    getErrorMessage(error).toLowerCase().includes("abort")
+  );
+}
+
+function isTimeoutAttempt(attempt: OpenRouterAttempt) {
+  const error = attempt.error.toLowerCase();
+  return error.includes("timed out") || error.includes("abort");
 }
 
 function extractResponseText(completion: unknown) {
@@ -58,94 +119,97 @@ function extractResponseText(completion: unknown) {
     return outputText;
   }
 
-  if (Array.isArray(completionRecord.output)) {
-    for (const item of completionRecord.output) {
-      const itemRecord = asRecord(item);
+  return getText(completionRecord.output);
+}
 
-      if (itemRecord?.type === "output_text" && Array.isArray(itemRecord.content)) {
-        const firstContent = asRecord(itemRecord.content[0]);
-        const text = getText(firstContent?.text);
-
-        if (text) {
-          return text;
-        }
-      }
-
-      if (itemRecord?.type === "message" && Array.isArray(itemRecord.content)) {
-        const textBlock = itemRecord.content
-          .map((block) => asRecord(block))
-          .find((block) => block?.type === "output_text");
-
-        if (Array.isArray(textBlock?.content)) {
-          const firstContent = asRecord(textBlock.content[0]);
-          const text = getText(firstContent?.text);
-
-          if (text) {
-            return text;
-          }
-        }
-      }
-    }
+function normalizeConfiguredModel(model: string | undefined) {
+  if (!model || RETIRED_SLOW_MODELS.has(model)) {
+    return PRIMARY_MODEL;
   }
 
-  return getText(completionRecord.output);
+  return model;
 }
 
 function getCandidateModels() {
   return Array.from(
     new Set([
-      env.OPENAI_MODEL,
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "google/gemma-2-9b-it:free",
-      "mistralai/mistral-7b-instruct:free",
-      "openrouter/auto",
-    ].filter(Boolean))
-  );
+      normalizeConfiguredModel(env.OPENAI_MODEL),
+      PRIMARY_MODEL,
+      ...FALLBACK_MODELS,
+    ]),
+  ).filter((model) => !RETIRED_SLOW_MODELS.has(model));
+}
+
+function getAttemptTimeoutMs(model: string, deadlineMs?: number) {
+  const baseTimeout = model === PRIMARY_MODEL ? PRIMARY_MODEL_TIMEOUT_MS : DEFAULT_MODEL_TIMEOUT_MS;
+
+  if (!deadlineMs) {
+    return baseTimeout;
+  }
+
+  const remainingMs = deadlineMs - Date.now() - 750;
+  return Math.max(0, Math.min(baseTimeout, remainingMs));
 }
 
 export async function generateMentorReply(
   message: string,
-  context: ChatRequestContext
+  context: ChatRequestContext,
+  options: GenerateOptions = {},
 ) {
   const analysis = analyzeToneMirror(message);
   const client = getOpenAIClient();
 
   if (!client) {
-    console.warn("No OpenRouter/OpenAI API key configured; using fallback response.");
-    return EMERGENCY_RESPONSE;
+    throw new ChatProviderError("OpenRouter client is not configured.", []);
   }
 
+  const attempts: OpenRouterAttempt[] = [];
   const candidates = getCandidateModels();
   const primaryModel = candidates[0];
+  const messages = [
+    {
+      role: "system" as const,
+      content: buildSystemPrompt(context),
+    },
+    {
+      role: "user" as const,
+      content: buildChatInstructions(message, analysis),
+    },
+  ];
 
   for (const model of candidates) {
-    const timeoutMs = model.includes("70b") ? 30000 : 15000;
-    const { controller, clear } = createAbortController(timeoutMs);
+    const timeoutMs = getAttemptTimeoutMs(model, options.deadlineMs);
+
+    if (timeoutMs < 1000 || options.signal?.aborted) {
+      throw new ChatTimeoutError(
+        "Chat request timed out before OpenRouter returned a response.",
+        attempts,
+      );
+    }
+
+    const startedAt = Date.now();
+    const { controller, clear } = createAbortController(timeoutMs, options.signal);
 
     try {
       const completion = await client.chat.completions.create(
         {
           model,
-          messages: [
-            {
-              role: "system",
-              content: buildSystemPrompt(context, demoMemories),
-            },
-            {
-              role: "user",
-              content: buildChatInstructions(message, analysis, context),
-            },
-          ],
+          messages,
+          max_tokens: MAX_COMPLETION_TOKENS,
+          temperature: 0.65,
+          top_p: 0.9,
         },
         {
           signal: controller.signal,
-        }
+        },
       );
 
       const reply = extractResponseText(completion);
 
       if (!reply) {
-        console.error("OpenRouter returned no text", { model });
+        const durationMs = Date.now() - startedAt;
+        attempts.push({ model, durationMs, error: "OpenRouter returned no text." });
+        console.error("OpenRouter returned no text", { model, durationMs });
         continue;
       }
 
@@ -157,23 +221,35 @@ export async function generateMentorReply(
         fallbackUsed: model !== primaryModel,
       };
     } catch (error) {
-      console.error("❌ OpenRouter request failed");
-      console.error("MODEL:", model);
-      console.error("ERROR:", error);
-      console.error("MESSAGE:", (error as Error)?.message);
-      continue;
+      const durationMs = Date.now() - startedAt;
+      const errorMessage = getErrorMessage(error);
+
+      attempts.push({ model, durationMs, error: errorMessage });
+      console.error("OpenRouter request failed", {
+        model,
+        durationMs,
+        error: errorMessage,
+      });
+
+      if (options.signal?.aborted) {
+        throw new ChatTimeoutError(
+          "Chat request timed out before OpenRouter returned a response.",
+          attempts,
+        );
+      }
+
+      if (!isAbortError(error)) {
+        continue;
+      }
     } finally {
       clear();
     }
   }
 
-  console.warn("All configured OpenRouter models failed; using fallback response.");
-  return {
-    reply:
-      "Bhai main abhi AI provider se connect nahi kar paa raha. Thoda sa wait karke dobara try kar, aur agar ye repeat ho raha hai to API key/model settings check karni padengi.",
-    selectedModel: "provider-fallback",
-    tone: analysis.tone,
-    analysis,
-    fallbackUsed: true,
-  };
+  if (attempts.length && attempts.every(isTimeoutAttempt)) {
+    throw new ChatTimeoutError("All OpenRouter model attempts timed out.", attempts);
+  }
+
+  console.error("All OpenRouter chat models failed", { attempts });
+  throw new ChatProviderError("All OpenRouter chat models failed.", attempts);
 }
