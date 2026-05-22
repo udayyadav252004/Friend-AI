@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 220 28% 8%;
+  --foreground: 210 24% 96%;
+  --card: 220 23% 11%;
+  --card-foreground: 210 24% 96%;
+  --popover: 220 23% 11%;
+  --popover-foreground: 210 24% 96%;
+  --primary: 350 88% 72%;
+  --primary-foreground: 220 36% 8%;
+  --secondary: 190 20% 17%;
+  --secondary-foreground: 210 24% 96%;
+  --muted: 190 20% 17%;
+  --muted-foreground: 210 12% 72%;
+  --accent: 158 74% 58%;
+  --accent-foreground: 220 36% 8%;
+  --border: 210 18% 21%;
+  --input: 210 18% 21%;
+  --ring: 350 88% 72%;
+  --font-sans: "Manrope", "Segoe UI", sans-serif;
+}
+
+.light {
+  --background: 205 36% 98%;
+  --foreground: 218 32% 10%;
+  --card: 0 0% 100%;
+  --card-foreground: 218 32% 10%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 218 32% 10%;
+  --primary: 350 78% 58%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 170 28% 94%;
+  --secondary-foreground: 218 32% 10%;
+  --muted: 170 28% 94%;
+  --muted-foreground: 218 16% 40%;
+  --accent: 158 58% 42%;
+  --accent-foreground: 0 0% 100%;
+  --border: 195 20% 86%;
+  --input: 195 20% 86%;
+  --ring: 350 78% 58%;
+}
+
+* {
+  @apply border-border;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply min-h-screen bg-background text-foreground antialiased;
+  background-image:
+    radial-gradient(circle at top left, rgba(251, 113, 133, 0.14), transparent 28%),
+    radial-gradient(circle at top right, rgba(52, 211, 153, 0.12), transparent 20%),
+    linear-gradient(180deg, rgba(18, 26, 36, 0.96), rgba(9, 14, 20, 1));
+}
+
+.light body {
+  background-image:
+    radial-gradient(circle at top left, rgba(244, 63, 94, 0.1), transparent 30%),
+    radial-gradient(circle at top right, rgba(16, 185, 129, 0.1), transparent 24%),
+    linear-gradient(180deg, rgba(249, 252, 252, 0.98), rgba(236, 248, 244, 1));
+}
+
+a {
+  @apply transition-colors;
+}
+
+::selection {
+  background: rgba(251, 113, 133, 0.36);
+}
+
+.glass {
+  background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+  backdrop-filter: blur(18px);
+}
+
+.grid-overlay {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 36px 36px;
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+textarea {
+  field-sizing: content;
+}
