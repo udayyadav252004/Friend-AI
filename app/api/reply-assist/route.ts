@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { replyAssistSchema } from "@/lib/validators";
 
-export const runtime = "edge";
-
 export async function POST(request: Request) {
   const body = await request.json();
   const parsed = replyAssistSchema.safeParse(body);
